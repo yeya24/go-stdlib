@@ -1,3 +1,4 @@
+//go:build go1.7
 // +build go1.7
 
 package nethttp
@@ -18,6 +19,8 @@ type mwOptions struct {
 	spanObserver  func(span opentracing.Span, r *http.Request)
 	urlTagFunc    func(u *url.URL) string
 	componentName string
+
+	startSpanOptionsFunc func(r *http.Request) []opentracing.StartSpanOption
 }
 
 // MWOption controls the behavior of the Middleware.
@@ -65,6 +68,14 @@ func MWURLTagFunc(f func(u *url.URL) string) MWOption {
 	}
 }
 
+// MWStartSpanOptionsFunc returns a MWOption that uses given function f
+// to set the span's start options.
+func MWStartSpanOptionsFunc(f func(r *http.Request) []opentracing.StartSpanOption) MWOption {
+	return func(options *mwOptions) {
+		options.startSpanOptionsFunc = f
+	}
+}
+
 // Middleware wraps an http.Handler and traces incoming requests.
 // Additionally, it adds the span to the request's context.
 //
@@ -72,21 +83,23 @@ func MWURLTagFunc(f func(u *url.URL) string) MWOption {
 // This can be overriden with options.
 //
 // Example:
-// 	 http.ListenAndServe("localhost:80", nethttp.Middleware(tracer, http.DefaultServeMux))
+//
+//	http.ListenAndServe("localhost:80", nethttp.Middleware(tracer, http.DefaultServeMux))
 //
 // The options allow fine tuning the behavior of the middleware.
 //
 // Example:
-//   mw := nethttp.Middleware(
-//      tracer,
-//      http.DefaultServeMux,
-//      nethttp.OperationNameFunc(func(r *http.Request) string {
-//	        return "HTTP " + r.Method + ":/api/customers"
-//      }),
-//      nethttp.MWSpanObserver(func(sp opentracing.Span, r *http.Request) {
-//			sp.SetTag("http.uri", r.URL.EscapedPath())
-//		}),
-//   )
+//
+//	  mw := nethttp.Middleware(
+//	     tracer,
+//	     http.DefaultServeMux,
+//	     nethttp.OperationNameFunc(func(r *http.Request) string {
+//		        return "HTTP " + r.Method + ":/api/customers"
+//	     }),
+//	     nethttp.MWSpanObserver(func(sp opentracing.Span, r *http.Request) {
+//				sp.SetTag("http.uri", r.URL.EscapedPath())
+//			}),
+//	  )
 func Middleware(tr opentracing.Tracer, h http.Handler, options ...MWOption) http.Handler {
 	return MiddlewareFunc(tr, h.ServeHTTP, options...)
 }
@@ -95,11 +108,15 @@ func Middleware(tr opentracing.Tracer, h http.Handler, options ...MWOption) http
 // It behaves identically to the Middleware function above.
 //
 // Example:
-//   http.ListenAndServe("localhost:80", nethttp.MiddlewareFunc(tracer, MyHandler))
+//
+//	http.ListenAndServe("localhost:80", nethttp.MiddlewareFunc(tracer, MyHandler))
 func MiddlewareFunc(tr opentracing.Tracer, h http.HandlerFunc, options ...MWOption) http.HandlerFunc {
 	opts := mwOptions{
 		opNameFunc: func(r *http.Request) string {
 			return "HTTP " + r.Method
+		},
+		startSpanOptionsFunc: func(r *http.Request) []opentracing.StartSpanOption {
+			return nil
 		},
 		spanFilter:   func(r *http.Request) bool { return true },
 		spanObserver: func(span opentracing.Span, r *http.Request) {},
@@ -122,7 +139,9 @@ func MiddlewareFunc(tr opentracing.Tracer, h http.HandlerFunc, options ...MWOpti
 			return
 		}
 		ctx, _ := tr.Extract(opentracing.HTTPHeaders, opentracing.HTTPHeadersCarrier(r.Header))
-		sp := tr.StartSpan(opts.opNameFunc(r), ext.RPCServerOption(ctx))
+		startSpanOpts := []opentracing.StartSpanOption{ext.RPCServerOption(ctx)}
+		startSpanOpts = append(startSpanOpts, opts.startSpanOptionsFunc(r)...)
+		sp := tr.StartSpan(opts.opNameFunc(r), startSpanOpts...)
 		ext.HTTPMethod.Set(sp, r.Method)
 		ext.HTTPUrl.Set(sp, opts.urlTagFunc(r.URL))
 		ext.Component.Set(sp, componentName)
